@@ -76,6 +76,8 @@ curl -OL https://github.com/rpwatkins/rpwatkins/releases/download/v0.0.1/socrate
 tar -xvzf socrates_0.0.2_darwin_amd64.tar.gz
 sudo mv socrates /usr/local/bin/socrates
 # or if you have ~/bin folder setup in the environment PATH variable
+[![FOSSA Status](https://app.fossa.io/api/projects/git%2Bgithub.com%2Frpwatkins%2Fsocrates.svg?type=shield)](https://app.fossa.io/projects/git%2Bgithub.com%2Frpwatkins%2Fsocrates?ref=badge_shield)
+
 mv buffalo ~/bin/socrates
 ----
 
@@ -189,3 +191,7 @@ The version command displays the current Socrates version number.
 
 
 
+
+
+## License
+[![FOSSA Status](https://app.fossa.io/api/projects/git%2Bgithub.com%2Frpwatkins%2Fsocrates.svg?type=large)](https://app.fossa.io/projects/git%2Bgithub.com%2Frpwatkins%2Fsocrates?ref=badge_large)
