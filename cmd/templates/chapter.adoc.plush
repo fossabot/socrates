@@ -1,0 +1,6 @@
+= <%= title %>
+
+include::include_01.adoc[]
+include::include_02.adoc[]
+
+

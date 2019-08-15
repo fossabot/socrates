@@ -1,429 +1,357 @@
 package cmd
 
 import (
-  "os"
-  "path"
-  "path/filepath"
+	"bytes"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 
-  "github.com/spf13/afero"
-  "github.com/spf13/cobra"
+	"github.com/gobuffalo/packr/v2"
+	"github.com/gobuffalo/plush"
+	"github.com/spf13/afero"
+	"github.com/spf13/cobra"
 
-  log "github.com/sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 )
 
+var bare bool
+var nogit bool
+
 var initCmd = &cobra.Command{
-  Use:   "init",
-  Short: "init creates a new manuscript.",
-  Long:  `The init command creates a new manuscript.`,
-  Run: func(cmd *cobra.Command, args []string) {
-    initProject()
-  },
+	Use:   "init",
+	Short: "init creates a new manuscript project.",
+	Long:  `The init command creates a new manuscript.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		initProject(afero.NewOsFs())
+	},
 }
 
 func init() {
-  rootCmd.AddCommand(initCmd)
+	rootCmd.AddCommand(initCmd)
+	initCmd.Flags().BoolVarP(&bare, "bare", "b", false, "create a bare project.")
+	initCmd.Flags().BoolVarP(&nogit, "nogit", "n", false, "skip git init")
 }
 
-func initProject() {
+func initProject(fs afero.Fs) {
 
-  // default filesystem
-  var fs = afero.NewOsFs()
+	empty, err := afero.IsEmpty(fs, ".")
+	if err != nil {
+		log.Error(err)
+		os.Exit(1)
+	}
+	if !empty {
+		log.Error("Folder not empty. A Socrates project can only be initialized in an empty folder.")
+		os.Exit(1)
+	}
 
-  // get the current working directory
-  cwd, err := os.Getwd()
-  if err != nil {
-    log.Error(err.Error())
-    os.Exit(1)
-  }
-  // confirm current working directory is empty
-  empty, err := afero.IsEmpty(fs, cwd)
-  if err != nil {
-    log.Error(err.Error())
-    os.Exit(1)
-  }
-  if !empty {
-    log.Error("Folder not empty. A Socrates project can only be initialized in an empty folder.")
-    os.Exit(1)
-  }
+	if !bare {
+		if err := writeFS(fs); err != nil {
+			log.Error(err)
+			log.Error("initilization failed.")
+			os.Exit(1)
+		}
 
-  log.Info("Initializing Socrates project.")
+	} else {
+		if err := writeBare(fs); err != nil {
+			log.Error(err)
+			log.Error("initilization failed.")
+			os.Exit(1)
+		}
+	}
+	log.Info("Socrates project created.")
+}
 
-  // create src folder/
-  if err := fs.Mkdir(filepath.Join(cwd, "src"), 0755); err != nil {
-    log.Error(err.Error())
-  }
-  src := path.Join(cwd, "src")
-
-  // create src/chapters
-  if err := fs.Mkdir(filepath.Join(src, "chapters"), 0755); err != nil {
-    log.Error(err.Error())
-  }
-
-  // create /src/assets
-  if err := fs.Mkdir(filepath.Join(src, "assets"), 0755); err != nil {
-    log.Error(err.Error())
-  }
-
-  // create images folder
-  if err := fs.Mkdir(filepath.Join(src, "images"), 0755); err != nil {
-    log.Error(err.Error())
-  }
-
-  // create resources folder
-  if err := fs.Mkdir(filepath.Join(src, "resources"), 0755); err != nil {
-    log.Error(err.Error())
-  }
-
-  // create pdfstyles folder
-  if err := fs.Mkdir(filepath.Join(src, "resources", "pdfstyles"), 0755); err != nil {
-    log.Error(err.Error())
-  }
-
-  // create back_matter folder
-  if err := fs.Mkdir(filepath.Join(src, "back_matter"), 0755); err != nil {
-    log.Error(err.Error())
-  }
-
-  createMaster(fs)
-  createChapter(fs)
-  createBib(fs)
-  createPDFStyles(fs)
-  createBibliography(fs)
-
-  log.Infof("Socrates project created at %s", cwd)
+// bare socrates
+func writeBare(fs afero.Fs) error {
+	box := packr.New("assets", "./templates")
+	file, err := box.Find("master-bare.adoc")
+	if err != nil {
+		return err
+	}
+	// copy file to destination
+	if err := afero.WriteFile(fs, master, file, 0644); err != nil {
+		return err
+	}
+	if Verbose {
+		log.Infof("%s created.", master)
+	}
+	// git init & add
+	git(fs)
+	return nil
 
 }
 
-func createMaster(fs afero.Fs) {
-  content := []byte(`:doctitle: Against Banning Student-Faculty Relationships
-:subtitle:
-:description:
-:keywords:
-:author: Rod Watkins
-:authorinitials: RPW
-:revnumber: 0.1.0
-:email:  rodwatkins@outlook.com
-:copyright: CC BY-NC-ND 4.0
-:revdate: {docdate}
-:doctype: article
-:toc: left
-:toclevels: 3
-:stem:
-:experimental:
-:lang: en
-:secnums:
-:icons: font
-:icon-set: fi
-:source-highlighter: rouge
-:bibliography-database: references.bib
-:bibliography-style: chicago-author-date
-:imagesdir: images
-:imagesoutdir: {docdir}/images
+func writeFS(fs afero.Fs) error {
+	box := packr.New("assets", "./templates")
 
-include::chapters/chapter_01.adoc[]
+	for _, v := range InitPaths() {
+		exists, err := afero.DirExists(fs, v)
+		if err != nil {
+			return err
+		}
+		if exists {
+			log.Warningf("%s folder exists", v)
+		} else {
+			if err := fs.Mkdir(v, 0755); err != nil {
+				return err
+			}
+			if Verbose {
+				log.Infof("%s folder created.", v)
+			}
+		}
+	}
 
-include::back_matter/bibliography.adoc[]`)
-  path := path.Join("src", "master.adoc")
-  // create master.adoc and place content in file
-  if err := afero.WriteFile(fs, path, content, 0644); err != nil {
-    log.Error(err)
-    os.Exit(1)
-  }
+	for k, v := range InitFileMap() {
+		exists, err := afero.Exists(fs, filepath.Join(v, k))
+		if err != nil {
+			return err
+		}
+		if exists {
+			log.Warningf("%s file exists.", filepath.Join(v, k))
+		} else {
+			// get file from box
+			file, err := box.Find(k)
+			if err != nil {
+				return err
+			}
+			if k[len(k)-5:] == "plush" {
+				// run through plush with number = 1
+
+				extension := filepath.Ext(k)
+				oldName := k[0 : len(k)-len(extension)]
+
+				title := ""
+				name := ""
+				if k[:8] == "appendix" {
+					title = "Appendix"
+					name = strings.Replace(oldName, "appendix", "appendix_01", 1)
+				} else if k[:7] == "chapter" {
+					title = "Chapter"
+					name = strings.Replace(oldName, "chapter", "chapter_01", 1)
+				} else if k[0:4] == "part" {
+					title = "Part"
+					name = strings.Replace(oldName, "part", "part_01", 1)
+				} else if k == "socrates.toml.plush" {
+					cwd, err := os.Getwd()
+					if err != nil {
+						log.Error(err)
+						os.Exit(1)
+					}
+					title = filepath.Base(cwd)
+					name = oldName
+				}
+
+				ctx := plush.NewContext()
+				ctx.Set("title", title)
+
+				s, err := plush.Render(string(file), ctx)
+				if err != nil {
+					return err
+				}
+				s2 := []byte(s)
+				// copy file to destination
+				if err := afero.WriteReader(fs, filepath.Join(v, name), bytes.NewReader(s2)); err != nil {
+					return err
+				}
+				if Verbose {
+					log.Infof("%s created.", filepath.Join(v, name))
+				}
+			} else {
+				// copy file to destination
+				if err := afero.WriteReader(fs, filepath.Join(v, k), bytes.NewReader(file)); err != nil {
+					return err
+				}
+				if Verbose {
+					log.Infof("%s created.", filepath.Join(v, k))
+				}
+			}
+		}
+	}
+	// git init & add
+	git(fs)
+	return nil
 }
 
-func createChapter(fs afero.Fs) {
-  content := []byte(`chapter one`)
-  path := path.Join("src", "chapters", "chapter_01.adoc")
+func git(fs afero.Fs) {
+	if !nogit {
+		_, err := exec.LookPath("git")
+		if err == nil {
+			c := exec.Command("git", "init")
+			b, err2 := c.CombinedOutput()
+			if err2 != nil {
+				log.Error(err2)
+			} else {
+				gi := strings.TrimSpace(string(b))
+				fmt.Printf("%s", gi)
 
-  // create master.adoc and place content in file
-  if err := afero.WriteFile(fs, path, content, 0644); err != nil {
-    log.Error(err)
-    os.Exit(1)
-  }
+				add := exec.Command("git", "add", ".")
+				o, err := add.CombinedOutput()
+				if err != nil {
+					log.Error(err)
+				}
+				ga := strings.TrimSpace(string(o))
+				fmt.Printf("\n%s", ga)
+			}
+		}
+	}
 }
 
-func createBib(fs afero.Fs) {
-  content := []byte(``)
-  path := path.Join("src", "references.bib")
-
-  // create references.bib file
-  if err := afero.WriteFile(fs, path, content, 0644); err != nil {
-    log.Error(err)
-    os.Exit(1)
-  }
+// default init below
+func InitPaths() []string {
+	return []string{
+		"front_matter",
+		"back_matter",
+		"images",
+		"assets",
+		"resources",
+		filepath.Join("resources", "pdfstyles"),
+		"parts",
+		filepath.Join("parts", "part_01"),
+		filepath.Join("parts", "part_01", "chapters"),
+		filepath.Join("parts", "part_01", "chapters", "chapter_01"),
+		filepath.Join("resources", "htmlstyles"),
+		filepath.Join("resources", "htmlstyles", "asciidoctor-bs-themes"),
+		filepath.Join("resources", "htmlstyles", "asciidoctor-skins"),
+		filepath.Join("resources", "htmlstyles", "stylesheet-factory"),
+		filepath.Join("resources", "htmlstyles", "stylesheets-bulma"),
+	}
 }
 
-func createBibliography(fs afero.Fs) {
-  content := []byte(`<<<
-[bibliography]
-== Bibliography
+func InitFileMap() map[string]string {
+	b := "back_matter"
+	f := "front_matter"
+	res := "resources"
 
-bibliography::[]`)
-  path := path.Join("src", "back_matter", "bibliography.adoc")
+	m := make(map[string]string)
+	m["appendix.adoc.plush"] = b
+	m["bibliography.adoc"] = b
+	m["colophon.adoc"] = b
+	m["glossary.adoc"] = b
+	m["index.adoc"] = b
+	m["preface.adoc"] = f
+	m["dedication.adoc"] = f
+	m["abstract.adoc"] = f
+	m[master] = "."
+	m["placeholder.jpg"] = "images"
+	m["references.bib"] = "."
+	m["socrates.toml.plush"] = "."
+	m[".gitignore"] = "."
+	m["chapter.adoc.plush"] = filepath.Join("parts", "part_01", "chapters", "chapter_01")
+	m["include_01.adoc"] = filepath.Join("parts", "part_01", "chapters", "chapter_01")
+	m["include_02.adoc"] = filepath.Join("parts", "part_01", "chapters", "chapter_01")
+	m["default-theme.yml"] = filepath.Join("resources", "pdfstyles")
+	m["part.adoc.plush"] = filepath.Join("parts", "part_01")
+	m["htmlstyles/asciidoctor-bs-themes/LICENSE"] = res
+	m["htmlstyles/asciidoctor-bs-themes/bootstrap_cerulean.css"] = res
+	m["htmlstyles/asciidoctor-bs-themes/bootstrap_cerulean.min.css"] = res
+	m["htmlstyles/asciidoctor-bs-themes/bootstrap_custom.css"] = res
+	m["htmlstyles/asciidoctor-bs-themes/bootstrap_custom.min.css"] = res
+	m["htmlstyles/asciidoctor-bs-themes/bootstrap_default_themed.css"] = res
+	m["htmlstyles/asciidoctor-bs-themes/bootstrap_default_themed.min.css"] = res
+	m["htmlstyles/asciidoctor-bs-themes/bootstrap_default.css"] = res
+	m["htmlstyles/asciidoctor-bs-themes/bootstrap_default.min.css"] = res
+	m["htmlstyles/asciidoctor-bs-themes/bootstrap_slate.css"] = res
+	m["htmlstyles/asciidoctor-bs-themes/bootstrap_slate.min.css"] = res
+	m["htmlstyles/asciidoctor-skins/LICENSE"] = res
+	m["htmlstyles/asciidoctor-skins/asciidoctor.css"] = res
+	m["htmlstyles/asciidoctor-skins/boot-cerulean.css"] = res
+	m["htmlstyles/asciidoctor-skins/boot-cosmo.css"] = res
+	m["htmlstyles/asciidoctor-skins/boot-cyborg.css"] = res
+	m["htmlstyles/asciidoctor-skins/boot-darkly.css"] = res
+	m["htmlstyles/asciidoctor-skins/boot-flatly.css"] = res
+	m["htmlstyles/asciidoctor-skins/boot-journal.css"] = res
+	m["htmlstyles/asciidoctor-skins/boot-lumen.css"] = res
+	m["htmlstyles/asciidoctor-skins/boot-paper.css"] = res
+	m["htmlstyles/asciidoctor-skins/boot-readable.css"] = res
+	m["htmlstyles/asciidoctor-skins/boot-sandstone.css"] = res
+	m["htmlstyles/asciidoctor-skins/boot-slate.css"] = res
+	m["htmlstyles/asciidoctor-skins/boot-spacelab.css"] = res
+	m["htmlstyles/asciidoctor-skins/boot-superhero.css"] = res
+	m["htmlstyles/asciidoctor-skins/boot-yeti.css"] = res
+	m["htmlstyles/asciidoctor-skins/clean.css"] = res
+	m["htmlstyles/asciidoctor-skins/dark.css"] = res
+	m["htmlstyles/asciidoctor-skins/fedora.css"] = res
+	m["htmlstyles/asciidoctor-skins/gazette.css"] = res
+	m["htmlstyles/asciidoctor-skins/italian-pop.css"] = res
+	m["htmlstyles/asciidoctor-skins/material-amber.css"] = res
+	m["htmlstyles/asciidoctor-skins/material-blue.css"] = res
+	m["htmlstyles/asciidoctor-skins/material-brown.css"] = res
+	m["htmlstyles/asciidoctor-skins/material-green.css"] = res
+	m["htmlstyles/asciidoctor-skins/material-grey.css"] = res
+	m["htmlstyles/asciidoctor-skins/material-orange.css"] = res
+	m["htmlstyles/asciidoctor-skins/material-pink.css"] = res
+	m["htmlstyles/asciidoctor-skins/material-purple.css"] = res
+	m["htmlstyles/asciidoctor-skins/material-red.css"] = res
+	m["htmlstyles/asciidoctor-skins/material-teal.css"] = res
+	m["htmlstyles/asciidoctor-skins/medium.css"] = res
+	m["htmlstyles/asciidoctor-skins/monospace.css"] = res
+	m["htmlstyles/asciidoctor-skins/notebook.css"] = res
+	m["htmlstyles/asciidoctor-skins/plain.css"] = res
+	m["htmlstyles/asciidoctor-skins/template.css"] = res
+	m["htmlstyles/asciidoctor-skins/tufte.css"] = res
+	m["htmlstyles/asciidoctor-skins/ubuntu.css"] = res
+	m["htmlstyles/stylesheet-factory/LICENSE"] = res
+	m["htmlstyles/stylesheet-factory/asciidoctor.css"] = res
+	m["htmlstyles/stylesheet-factory/colony.css"] = res
+	m["htmlstyles/stylesheet-factory/foundation-lime.css"] = res
+	m["htmlstyles/stylesheet-factory/foundation-potion.css"] = res
+	m["htmlstyles/stylesheet-factory/foundation.css"] = res
+	m["htmlstyles/stylesheet-factory/github.css"] = res
+	m["htmlstyles/stylesheet-factory/golo.css"] = res
+	m["htmlstyles/stylesheet-factory/iconic.css"] = res
+	m["htmlstyles/stylesheet-factory/maker.css"] = res
+	m["htmlstyles/stylesheet-factory/readthedocs.css"] = res
+	m["htmlstyles/stylesheet-factory/riak.css"] = res
+	m["htmlstyles/stylesheet-factory/rocket-panda.css"] = res
+	m["htmlstyles/stylesheet-factory/rubygems.css"] = res
+	m["htmlstyles/stylesheets-bulma/LICENSE"] = res
+	m["htmlstyles/stylesheets-bulma/asciidoctor-embedded.css"] = res
+	m["htmlstyles/stylesheets-bulma/asciidoctor-embedded.css.map"] = res
+	m["htmlstyles/stylesheets-bulma/asciidoctor-embedded.min.css"] = res
+	m["htmlstyles/stylesheets-bulma/asciidoctor.css"] = res
+	m["htmlstyles/stylesheets-bulma/asciidoctor.css.map"] = res
+	m["htmlstyles/stylesheets-bulma/asciidoctor.min.css"] = res
+	m["htmlstyles/stylesheets-bulma/colony.css"] = res
+	m["htmlstyles/stylesheets-bulma/colony.css.map"] = res
+	m["htmlstyles/stylesheets-bulma/colony.min.css"] = res
+	m["htmlstyles/stylesheets-bulma/darkly.css"] = res
+	m["htmlstyles/stylesheets-bulma/darkly.css.map"] = res
+	m["htmlstyles/stylesheets-bulma/darkly.min.css"] = res
+	m["htmlstyles/stylesheets-bulma/foundation-lime.css"] = res
+	m["htmlstyles/stylesheets-bulma/foundation-lime.css.map"] = res
+	m["htmlstyles/stylesheets-bulma/foundation-lime.min.css"] = res
+	m["htmlstyles/stylesheets-bulma/foundation-potion.css"] = res
+	m["htmlstyles/stylesheets-bulma/foundation-potion.css.map"] = res
+	m["htmlstyles/stylesheets-bulma/foundation-potion.min.css"] = res
+	m["htmlstyles/stylesheets-bulma/foundation.css"] = res
+	m["htmlstyles/stylesheets-bulma/foundation.css.map"] = res
+	m["htmlstyles/stylesheets-bulma/foundation.min.css"] = res
+	m["htmlstyles/stylesheets-bulma/github.css"] = res
+	m["htmlstyles/stylesheets-bulma/github.css.map"] = res
+	m["htmlstyles/stylesheets-bulma/github.min.css"] = res
+	m["htmlstyles/stylesheets-bulma/golo.css"] = res
+	m["htmlstyles/stylesheets-bulma/golo.css.map"] = res
+	m["htmlstyles/stylesheets-bulma/golo.min.css"] = res
+	m["htmlstyles/stylesheets-bulma/iconic.css"] = res
+	m["htmlstyles/stylesheets-bulma/iconic.css.map"] = res
+	m["htmlstyles/stylesheets-bulma/iconic.min.css"] = res
+	m["htmlstyles/stylesheets-bulma/maker.css"] = res
+	m["htmlstyles/stylesheets-bulma/maker.css.map"] = res
+	m["htmlstyles/stylesheets-bulma/maker.min.css"] = res
+	m["htmlstyles/stylesheets-bulma/readthedocs.css"] = res
+	m["htmlstyles/stylesheets-bulma/readthedocs.css.map"] = res
+	m["htmlstyles/stylesheets-bulma/readthedocs.min.css"] = res
+	m["htmlstyles/stylesheets-bulma/riak.css"] = res
+	m["htmlstyles/stylesheets-bulma/riak.css.map"] = res
+	m["htmlstyles/stylesheets-bulma/riak.min.css"] = res
+	m["htmlstyles/stylesheets-bulma/rocket-panda.css"] = res
+	m["htmlstyles/stylesheets-bulma/rocket-panda.css.map"] = res
+	m["htmlstyles/stylesheets-bulma/rocket-panda.min.css"] = res
+	m["htmlstyles/stylesheets-bulma/rubygems.css"] = res
+	m["htmlstyles/stylesheets-bulma/rubygems.css.map"] = res
+	m["htmlstyles/stylesheets-bulma/rubygems.min.css"] = res
 
-  // create references.bib file
-  if err := afero.WriteFile(fs, path, content, 0644); err != nil {
-    log.Error(err)
-    os.Exit(1)
-  }
-}
-
-func createPDFStyles(fs afero.Fs) {
-
-  content := []byte(`font:
-catalog:
-  # Noto Serif supports Latin, Latin-1 Supplement, Latin Extended-A, Greek, Cyrillic, Vietnamese & an assortment of symbols
-  Noto Serif:
-    normal: notoserif-regular-subset.ttf
-    bold: notoserif-bold-subset.ttf
-    italic: notoserif-italic-subset.ttf
-    bold_italic: notoserif-bold_italic-subset.ttf
-  # M+ 1mn supports ASCII and the circled numbers used for conums
-  M+ 1mn:
-    normal: mplus1mn-regular-ascii-conums.ttf
-    bold: mplus1mn-bold-ascii.ttf
-    italic: mplus1mn-italic-ascii.ttf
-    bold_italic: mplus1mn-bold_italic-ascii.ttf
-  # M+ 1p supports Latin, Latin-1 Supplement, Latin Extended, Greek, Cyrillic, Vietnamese, Japanese & an assortment of symbols
-  # It also provides arrows for ->, <-, => and <= replacements in case these glyphs are missing from font
-  M+ 1p Fallback:
-    normal: mplus1p-regular-fallback.ttf
-    bold: mplus1p-regular-fallback.ttf
-    italic: mplus1p-regular-fallback.ttf
-    bold_italic: mplus1p-regular-fallback.ttf
-fallbacks:
-  - M+ 1p Fallback
-page:
-  background_color: ffffff
-  layout: portrait
-  margin: [1in, 1in, 1in, 1in]
-  size: Letter
-base:
-  align: justify
-  # color as hex string (leading # is optional)
-  font_color: 111111
-  # color as RGB array
-  #font_color: [51, 51, 51]
-  # color as CMYK array (approximated)
-  #font_color: [0, 0, 0, 0.92]
-  #font_color: [0, 0, 0, 92%]
-  font_family: Noto Serif
-  # choose one of these font_size/line_height_length combinations
-  #font_size: 14
-  #line_height_length: 20
-  #font_size: 11.25
-  #line_height_length: 18
-  #font_size: 11.2
-  #line_height_length: 16
-  font_size: 10.5
-  line_height_length: 15
-  # correct line height for Noto Serif metrics
-  #line_height_length: 12
-  #font_size: 11.25
-  #line_height_length: 18
-  line_height: $base_line_height_length / $base_font_size
-  font_size_large: round($base_font_size * 1.25)
-  font_size_small: round($base_font_size * 0.85)
-  font_size_min: $base_font_size * 0.75
-  font_style: normal
-  border_color: eeeeee
-  border_radius: 4
-  border_width: 0.5
-# FIXME vertical_rhythm is weird; we should think in terms of ems
-#vertical_rhythm: $base_line_height_length * 2 / 3
-# correct line height for Noto Serif metrics (comes with built-in line height)
-vertical_rhythm: $base_line_height_length
-horizontal_rhythm: $base_line_height_length
-# QUESTION should vertical_spacing be block_spacing instead?
-vertical_spacing: $vertical_rhythm
-link:
-  font_color: 428bca
-# literal is currently used for inline monospaced in prose and table cells
-literal:
-  font_color: b12146
-  font_family: M+ 1mn
-menu_caret_content: " <font size=\"1.15em\"><color rgb=\"b12146\">\u203a</color></font> "
-heading:
-  #font_color: 181818
-  font_color: $base_font_color
-  font_family: M+ 1p Fallback
-  font_style: bold
-  # h1 is used for part titles (book doctype only)
-  h1_font_size: floor($base_font_size * 2.6)
-  # h2 is used for chapter titles (book doctype only)
-  h2_font_size: floor($base_font_size * 2.15)
-  h3_font_size: round($base_font_size * 1.7)
-  h4_font_size: $base_font_size_large
-  h5_font_size: $base_font_size
-  h6_font_size: $base_font_size_small
-  #line_height: 1.4
-  # correct line height for Noto Serif metrics (comes with built-in line height)
-  line_height: 1
-  margin_top: $vertical_rhythm * 0.4
-  margin_bottom: $vertical_rhythm * 0.9
-title_page:
-  align: right
-  logo:
-    top: 10%
-  title:
-    top: 55%
-    font_size: $heading_h1_font_size
-    font_color: 999999
-    line_height: 0.9
-  subtitle:
-    font_size: $heading_h3_font_size
-    font_style: bold_italic
-    line_height: 1
-  authors:
-    margin_top: $base_font_size * 1.25
-    font_size: $base_font_size_large
-    font_color: 181818
-  revision:
-    margin_top: $base_font_size * 1.25
-block:
-  margin_top: 0
-  margin_bottom: $vertical_rhythm
-caption:
-  align: left
-  font_style: italic
-  # FIXME perhaps set line_height instead of / in addition to margins?
-  margin_inside: $vertical_rhythm / 3
-  #margin_inside: $vertical_rhythm / 4
-  margin_outside: 0
-lead:
-  font_size: $base_font_size_large
-  line_height: 1.4
-abstract:
-  font_color: 5c6266
-  font_size: $lead_font_size
-  line_height: $lead_line_height
-  font_style: italic
-  first_line_font_style: bold
-admonition:
-  border_color: $base_border_color
-  border_width: $base_border_width
-  padding: [0, $horizontal_rhythm, 0, $horizontal_rhythm]
-#  icon:
-#    tip:
-#      name: fa-lightbulb-o
-#      stroke_color: 111111
-#      size: 24
-blockquote:
-  font_color: $base_font_color
-  font_size: $base_font_size_small
-  border_color: $base_border_color
-  border_width: 5
-  padding: [$vertical_rhythm / 2, $horizontal_rhythm, $vertical_rhythm / -2, $horizontal_rhythm + $blockquote_border_width / 2]
-  cite_font_size: $base_font_size_small
-  cite_font_color: 999999
-# code is used for source blocks (perhaps change to source or listing?)
-code:
-  font_color: $base_font_color
-  font_family: $literal_font_family
-  font_size: ceil($base_font_size)
-  padding: $code_font_size
-  line_height: 1.25
-  background_color: f5f5f5
-  border_color: cccccc
-  border_radius: $base_border_radius
-  border_width: 0.75
-conum:
-  font_family: M+ 1mn
-  font_color: $literal_font_color
-  font_size: $base_font_size
-  line_height: 4 / 3
-example:
-  border_color: $base_border_color
-  border_radius: $base_border_radius
-  border_width: 0.75
-  background_color: transparent
-  # FIXME reenable margin bottom once margin collapsing is implemented
-  padding: [$vertical_rhythm, $horizontal_rhythm, 0, $horizontal_rhythm]
-image:
-  align: left
-prose:
-  margin_top: 0
-  margin_bottom: $vertical_rhythm
-sidebar:
-  border_color: $page_background_color
-  border_radius: $base_border_radius
-  border_width: $base_border_width
-  background_color: eeeeee
-  # FIXME reenable margin bottom once margin collapsing is implemented
-  padding: [$vertical_rhythm, $vertical_rhythm * 1.25, 0, $vertical_rhythm * 1.25]
-  title:
-    align: center
-    font_color: $heading_font_color
-    font_family: $heading_font_family
-    font_size: $heading_h4_font_size
-    font_style: $heading_font_style
-thematic_break:
-  border_color: $base_border_color
-  border_style: solid
-  border_width: $base_border_width
-  margin_top: $vertical_rhythm * 0.5
-  margin_bottom: $vertical_rhythm * 1.5
-description_list:
-  term_font_style: italic
-  term_spacing: $vertical_rhythm / 4
-  description_indent: $horizontal_rhythm * 1.25
-outline_list:
-  indent: $horizontal_rhythm * 1.5
-  # NOTE item_spacing applies to list items that do not have complex content
-  item_spacing: $vertical_rhythm / 2
-  #marker_font_color: 404040
-table:
-  background_color: $page_background_color
-  #head_background_color: <hex value>
-  #head_font_color: $base_font_color
-  head_font_style: bold
-  even_row_background_color: f9f9f9
-  #odd_row_background_color: <hex value>
-  foot_background_color: f0f0f0
-  border_color: dddddd
-  border_width: $base_border_width
-  # HACK accounting for line-height
-  cell_padding: [3, 3, 6, 3]
-toc:
-  dot_leader_color: dddddd
-  #dot_leader_content: '. '
-  indent: $horizontal_rhythm
-  line_height: 1.4
-# NOTE In addition to footer, header is also supported
-footer:
-  font_size: $base_font_size_small
-  font_color: $base_font_color
-  # NOTE if background_color is set, background and border will span width of page
-  border_color: dddddd
-  border_width: 0.25
-  height: $base_line_height_length * 2.5
-  line_height: 1
-  padding: [$base_line_height_length / 2, 1, 0, 1]
-  vertical_align: top
-  #image_vertical_align: <alignment> or <number>
-  # additional attributes for content:
-  # * {page-count}
-  # * {page-number}
-  # * {document-title}
-  # * {document-subtitle}
-  # * {chapter-title}
-  # * {section-title}
-  # * {section-or-chapter-title}
-  recto_content:
-    #right: '{section-or-chapter-title} | {page-number}'
-    #right: '{document-title} | {page-number}'
-    right: '{page-number}'
-    #center: '{page-number}'
-  verso_content:
-    #left: '{page-number} | {chapter-title}'
-    left: '{page-number}'
-    #center: '{page-number}'`)
-  path := path.Join("src", "resources", "pdfstyles", "default-theme.yml")
-
-  // create references.bib file
-  if err := afero.WriteFile(fs, path, content, 0644); err != nil {
-    log.Error(err)
-    os.Exit(1)
-  }
-
+	return m
 }
